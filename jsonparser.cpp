@@ -1,7 +1,11 @@
 #include <iostream>
-#include <map>
+#include <vector>
+#include <fstream>
+#include <unordered_map>
+#include <string.h>
 #include <unistd.h>
 #include <stdint.h>
+
 using namespace std;
 
 
@@ -9,10 +13,13 @@ enum json_exit_codes{
 	JSON_VALID = 0,
 	JSON_END,
 	JSON_OBJECT_END,
+	JSON_ARRAY_END,
 	JSON_EXPECTED_KEY,
+	JSON_EXPECTED_VALUE,
 	JSON_VALUE_NOT_EXPECTED,
 	JSON_COLON_NOT_EXPECTED,
 	JSON_NO_KEY,
+	JSON_INVALID_OBJECT,
 	JSON_UNKNOWN_ERROR 
 };
 
@@ -52,10 +59,13 @@ typedef struct {
 }token;
 
 typedef struct {
-	const char *content;
-	size_t content_len;
+	char *content;
+	long long content_len;
 	size_t cursor;
-	size_t line;
+	bool quote_open;
+	token end_token;
+	ifstream file;
+	size_t read;
 }lexer;
 
 typedef struct{
@@ -69,121 +79,95 @@ typedef struct{
 }json_var;
 
 const char* token_type_tostring(token_type);
+bool inline token_is_value(const token_type &tkn);
+void json_print_object(const unordered_map<string,json_var> &data,const size_t indent = 0);
+void json_print_arr(vector<json_var> &data,const size_t indent = 0);
 
-lexer lexer_new(const char *content,size_t content_len);
+lexer lexer_new(char *content,size_t content_len);
 token lexer_next(lexer *l);
 token lexer_next_quote(lexer *l);
 void lexer_trim_left(lexer *l);
+int8_t refill_content(lexer *l,token &tkn);
 
 parser parser_new();
-uint8_t json_parse(lexer *l,map<string,json_var> &parsed_data,parser &json);
+int8_t json_parse(lexer *l,unordered_map<string,json_var> &parsed_data,parser &json,string file_name);
+int8_t json_parse_object(lexer *l,unordered_map<string,json_var> &parsed_data,parser &json);
+int8_t json_parse_array(lexer *l,vector<json_var> &arr,parser &json);
 
 int main(int argc,char **argv){
-	const char *text = "{   \"hello\":32 , \"name\"    : \"st./m:;$#upid ass\",\"angle\":      69.3325, \"obj\" : {\"hi\":\"bye\",\"goodbeatch\":69420}, \"arr\":[1,2,3,4,5,6,7,8,9,0]}";
+	string file_name = string(argv[1]);
 	
-	lexer l = lexer_new(text,strlen(text));
-	map<string,json_var> res;
+	char *text = (char*)malloc(1024*1024+1);
+	memset(text,0,1024*1024+1);
+	lexer l = lexer_new(text,1024*1024);
+	l.read = 0;
+	l.file = ifstream(file_name);
+	unordered_map<string,json_var> res;
+	
 	int result = JSON_VALID;
 	parser json = parser_new();
-	while(result != JSON_END){
-		result = (int)json_parse(&l,res,json);
-	}
-	for (const auto& [key, value] : res)
-	{
-    		std::cout << key << ": ";
-		switch(value.tkn.type){
-			case TOKEN_STRING:
-				cout << *((string*)value.val);
-				break;
-			case TOKEN_INT:
-				cout <<  *((int*)value.val);
-				break;
-			case TOKEN_FLOAT:
-				cout << *((float*)value.val);
-				break;
-			case TOKEN_OBJECT:
-				cout << endl;
-				for (const auto& [key1,value1] : *((map<string,json_var>*)value.val)){
-					cout  << '	' << key1 << ": ";
-					switch(value1.tkn.type){
-						case TOKEN_STRING:
-							cout << *((string*)value1.val);
-							break;
-						case TOKEN_INT:
-							cout <<  *((int*)value1.val);
-							break;
-						case TOKEN_FLOAT:
-							cout << *((float*)value1.val);
-							break;
-						default:
-							cout << "type: " << token_type_tostring(value.tkn.type);
-							break;
-					}
-					cout << endl;
-				}
-				break;
-				
-			default:
-				cout << "type: " << token_type_tostring(value.tkn.type);
-		}
-		cout << endl;
-	}
+	
+	result = (int)json_parse(&l,res,json,file_name);
+	cout << "EXIT_CODE: " << result << endl;
 
+	
+	
+	return 0;
 
 }
 
 
 
 // !!WARNING!! token text will become invalid if the content of the lexer changes, but the token types are still valid
-uint8_t json_parse(lexer *l,map<string,json_var> &parsed_data,parser &json){
+int8_t json_parse(lexer *l,unordered_map<string,json_var> &parsed_data,parser &json,string file_name){
+
+	return json_parse_object(l,parsed_data,json);
+}
+
+int8_t json_parse_object(lexer *l,unordered_map<string,json_var> &parsed_data,parser &json){
+	json.state |=VACANT_COMMA;
 	bool vacant_key= json.state & VACANT_KEY,vacant_comma = json.state & VACANT_COMMA,expect_value = json.state & EXPECT_VALUE;
-	token a = lexer_next(l);
+	token a;
+	while(true){
+	vacant_key= json.state & VACANT_KEY;
+	vacant_comma = json.state & VACANT_COMMA;
+	expect_value = json.state & EXPECT_VALUE;
+
+	a = lexer_next(l);
 	string key= json.key;
-	cout << endl << token_type_tostring(a.type) << endl;
-	if(a.type == TOKEN_END){
-		return JSON_END;
-	}
 	switch(a.type){
 		case TOKEN_END:
-			return JSON_END;
+			break;
 		case TOKEN_OBJECT_LEFT:
 			if(expect_value){
 				json.state ^= EXPECT_VALUE;
 				parsed_data[key].tkn = a;
 				parsed_data[key].tkn.type = TOKEN_OBJECT;
-				parsed_data[key].val = (void*)(new map<string,json_var>);
+				parsed_data[key].val = (void*)(new unordered_map<string,json_var>);
 				json.state |= VACANT_COMMA;
-				while(json_parse(l,*((map<string,json_var>*)parsed_data[key].val),json) != JSON_OBJECT_END);
-				return JSON_VALID;
+				int8_t exit_code = JSON_VALID;
+				while(exit_code != JSON_OBJECT_END){
+					exit_code = json_parse_object(l,*((unordered_map<string,json_var>*)parsed_data[key].val),json);
+					if(exit_code != JSON_OBJECT_END)return exit_code;
+				}
+				break;
 			}
-			return JSON_VALID;
+			break;
 		case TOKEN_OBJECT_RIGHT:
 			return JSON_OBJECT_END;
 		case TOKEN_ARRAY_LEFT:
 			if(expect_value){
+				json.state ^= EXPECT_VALUE;
 				parsed_data[key].tkn = a;
-				parsed_data[key].tkn.typ = TOKEN_ARRAY;
+				parsed_data[key].tkn.type = TOKEN_ARRAY;
 				parsed_data[key].val= (void*)(new vector<json_var>);
-				a = lexer_next(l);
-				while(a.tkn.type != TOKEN_ARRAY_RIGHT || a.tkn.type != TOKEN_END || a.tkn.type != TOKEN_INVALID){
-					if(a.tkn.type != TOKEN_COMMA){
-						json_var array_element;
-						array_element.tkn = a;
-						switch(a.tkn.type){
-							case TOKEN_INT:
-								
-						}
-						array_element
-						(*((vector<json_var>*)parsed_data[key].val)).push_back(
-					}
-				}
+				uint8_t res1 = json_parse_array(l,*((vector<json_var>*)parsed_data[key].val),json);
+				if(res1 != JSON_ARRAY_END)return res1;
+				break;
 			}
 			return JSON_VALUE_NOT_EXPECTED;
 		case TOKEN_STRING:{
-			cout << "STRING: " << string(a.text,a.text_len) << endl;
-			if(a.type == TOKEN_END)return JSON_END;
-			if(expect_value && a.type == TOKEN_STRING){
-				cout << "string value key: " << key << endl;
+			if(expect_value) {
 				parsed_data[key].tkn = a;
 				parsed_data[key].val =  (void*)(new string(a.text,a.text_len));
 				json.state ^= EXPECT_VALUE;
@@ -192,14 +176,14 @@ uint8_t json_parse(lexer *l,map<string,json_var> &parsed_data,parser &json){
 				json.key.assign(a.text,a.text_len);
 				json.state |= VACANT_KEY;
 			}
-			return JSON_VALID;
+			break;
 			}
 		case TOKEN_TRUE:
 			if(expect_value){
 				parsed_data[key].tkn = a;
 				parsed_data[key].val = (void*)(new bool);
 				*((bool*)parsed_data[key].val) = true;
-				return JSON_VALID;
+				break;
 			}
 			else{
 				return JSON_EXPECTED_KEY;
@@ -209,7 +193,7 @@ uint8_t json_parse(lexer *l,map<string,json_var> &parsed_data,parser &json){
 				parsed_data[key].tkn = a;
 				parsed_data[key].val = (void*)(new bool);
 				*((bool*)parsed_data[key].val) = false;
-				return JSON_VALID;
+				break;
 			}
 			else{
 				return JSON_EXPECTED_KEY;
@@ -219,7 +203,7 @@ uint8_t json_parse(lexer *l,map<string,json_var> &parsed_data,parser &json){
 				parsed_data[key].tkn = a;
 				parsed_data[key].val = (void*)(new uint8_t);
 				*((uint8_t*)parsed_data[key].val) = 0;
-				return JSON_VALID;
+				break;
 			}
 			else{
 				return JSON_EXPECTED_KEY;
@@ -228,7 +212,7 @@ uint8_t json_parse(lexer *l,map<string,json_var> &parsed_data,parser &json){
 			if(vacant_key && vacant_comma){
 				json.state |= EXPECT_VALUE;
 				json.state ^= (VACANT_KEY | VACANT_COMMA);
-				return JSON_VALID;
+				break;
 			}
 			return JSON_NO_KEY;
 		case TOKEN_INT:
@@ -243,49 +227,227 @@ uint8_t json_parse(lexer *l,map<string,json_var> &parsed_data,parser &json){
 					parsed_data[key].val = (void*)(new long long);
 					*((long long*)parsed_data[key].val) = val2;
 					json.state ^= EXPECT_VALUE;
-					return JSON_VALID;
+					break;
 
 				}
-				parsed_data[key].val = new int(val);
-				cout << "key: " << key << endl;
-				cout << "INT: " << val << endl;
+				parsed_data[key].val = (void*)(new int(val));
 				json.state ^= EXPECT_VALUE;
-				return JSON_VALID;
+				break;
 			}
 			return JSON_VALUE_NOT_EXPECTED;
 		case TOKEN_FLOAT:
 			if(expect_value){
 				float val;
+				double val2;
 				parsed_data[key].tkn = a;
 				try{
 					val = stof(string(a.text,a.text_len));
 				}
 				catch( const out_of_range){
-					float val2 = stod(string(a.text,a.text_len));
+					val2 = stod(string(a.text,a.text_len));
 					parsed_data[key].val = (void*)(new double(val2));
 					json.state ^= EXPECT_VALUE;
-					return JSON_VALID;
+					break;
 				}
 				parsed_data[key].val = (void*)(new float(val));
-				cout << "key: " << key << endl;
-				cout << "FLOAT: " << val;
 				json.state ^= EXPECT_VALUE;
-				return JSON_VALID;
+				break;
 			}
 			return JSON_VALUE_NOT_EXPECTED;
 		case TOKEN_COMMA:
 			if(!expect_value){
 				json.state |= VACANT_COMMA;
-				return JSON_VALID;
+				break;
 			}
 			return JSON_COLON_NOT_EXPECTED;
 			break;
 		default:
 			return JSON_UNKNOWN_ERROR;
 	}
+}
+}
+int8_t json_parse_array(lexer *l,vector<json_var> &arr,parser &json){
+	json.state |= EXPECT_VALUE;
+	
+	token tkn;
+
+	json_var value;
+	while(true){
+		tkn = lexer_next(l);
+		if(tkn.type == TOKEN_ARRAY_RIGHT){
+			if(json.state & EXPECT_VALUE)return JSON_EXPECTED_VALUE;
+			return JSON_ARRAY_END;
+		}
+		else if(tkn.type == TOKEN_COMMA){
+			if(json.state & EXPECT_VALUE)return JSON_EXPECTED_VALUE;
+			json.state |= EXPECT_VALUE;
+			continue;
+		}
+		else if(!token_is_value(tkn.type)){
+			return JSON_EXPECTED_VALUE;
+		}
+		
+		value.tkn = tkn;
+		switch(tkn.type){
+			case TOKEN_INT:
+				int val;
+				long long val2;
+				try{
+					val = stoi(string(tkn.text,tkn.text_len));
+				}
+				catch(const out_of_range){
+					val2 = stoll(string(tkn.text,tkn.text_len));
+					value.val = (void*)(new long long);
+					*((long long*)value.val) = val2;
+					break;
+				}
+				value.val = (void*)(new int(val));
+				break;
+			case TOKEN_FLOAT:
+				float valf;
+				double valf2;
+				try{
+					valf = stof(string(tkn.text,tkn.text_len));
+				}
+				catch( const out_of_range){
+					valf2 = stod(string(tkn.text,tkn.text_len));
+					value.val = (void*)(new double(valf2));
+					break;
+				}
+				value.val = (void*)(new float(valf));
+				break;
+			case TOKEN_STRING:
+				value.val =  (void*)(new string(tkn.text,tkn.text_len));
+				break;
+			case TOKEN_TRUE:
+				value.val = (void*)(new bool);
+				*((bool*)val) = true;
+				break;
+			case TOKEN_FALSE:
+				value.val = (void*)(new bool);
+				*((bool*)val) = false;
+	 			break;
+			case TOKEN_NULL:
+				value.val = (void*)(new uint8_t);
+				*((uint8_t*)value.val) = 0;
+				break;
+			case TOKEN_ARRAY_LEFT:
+				value.tkn.type = TOKEN_ARRAY;
+				value.val = (void*)(new vector<json_var>);
+				json_parse_array(l,*((vector<json_var>*)value.val),json);
+				break;
+			case TOKEN_OBJECT_LEFT:
+				value.tkn.type = TOKEN_OBJECT;
+				value.val = (void*)(new unordered_map<string,json_var>);
+				json.state ^= EXPECT_VALUE;
+				uint8_t parse_res = json_parse_object(l,*((unordered_map<string,json_var>*)value.val),json);
+				if(parse_res != JSON_VALID && parse_res !=JSON_OBJECT_END)return parse_res;
+				arr.push_back(value);
+				l->end_token=value.tkn;
+				continue;
+		}
+		json.state ^= EXPECT_VALUE;
+		arr.push_back(value);
+		l->end_token=value.tkn;
+	}
 	return JSON_VALID;
 }
 
+void json_print_object(const unordered_map<string,json_var> &data,const size_t indent){
+	for (const auto& [key, value] : data)
+	{
+		for(int j =0;j<indent;j++)cout << '	';
+    		cout << key << ": " ;
+		switch(value.tkn.type){
+			case TOKEN_STRING:
+				cout << *((string*)value.val);
+				break;
+			case TOKEN_INT:
+				cout <<  *((int*)value.val);
+				break;
+			case TOKEN_FLOAT:
+				cout << *((float*)value.val);
+				break;
+			case TOKEN_OBJECT:
+				cout << endl;
+				json_print_object(*((unordered_map<string,json_var>*)value.val),indent+1);
+				break;
+			case TOKEN_ARRAY:
+				cout << endl;
+				json_print_arr(*((vector<json_var>*)value.val),indent+1);
+				break;
+			default:
+				cout << "NON VALUE TYPE: " << token_type_tostring(value.tkn.type) << " :: " << key ;
+				break;
+		}
+		cout<< endl;
+	}
+
+}
+
+void json_print_arr(vector<json_var> &data,const size_t indent){
+	for(vector<json_var>::iterator i =  data.begin();i != data.end();i++){
+		for(int j =0;j<indent;j++)cout << '	';
+		switch(i->tkn.type){
+		case TOKEN_STRING:
+			cout << *((string*)i->val);
+			break;
+		case TOKEN_INT:
+			cout <<  *((int*)i->val);
+			break;
+		case TOKEN_FLOAT:
+			cout << *((float*)i->val);
+			break;
+		case TOKEN_OBJECT:
+			cout << endl;
+			json_print_object(*((unordered_map<string,json_var>*)i->val),indent+1);
+			break;
+		case TOKEN_ARRAY:
+			cout << endl;
+			json_print_arr(*((vector<json_var>*)i->val),indent+1);
+			break;
+		default:
+			cout << "NON VALUE TYPE: " << token_type_tostring(i->tkn.type);
+			break;
+		}
+	cout << endl;
+	}
+}
+
+int8_t refill_content(lexer *l,token &tkn){
+
+	
+	
+	memcpy(l->content,tkn.text,tkn.text_len);
+	tkn.text= l->content;
+	
+	long long read_before = l->file.tellg();
+	
+	l->file.seekg(0,ios_base::end);
+	long long file_size = l->file.tellg();
+	l->file.seekg(read_before);
+
+
+	l->file.read(l->content+tkn.text_len,min((long long)(l->content_len-tkn.text_len),file_size-read_before));
+	long long read_after = l->file.tellg();
+	
+	l->cursor =tkn.text_len;
+	
+	l->read += read_after-read_before;
+	if(read_after > read_before){
+		l->content[l->cursor + read_after-read_before] = 0;
+	}
+	else if(read_after == read_before){
+		return 0;
+	}
+
+	return 1;
+	
+}
+
+inline bool token_is_value(const token_type &tkn){
+	return !(tkn != TOKEN_STRING && tkn != TOKEN_INT && tkn != TOKEN_FLOAT && tkn != TOKEN_OBJECT_LEFT && tkn != TOKEN_ARRAY_LEFT && tkn != TOKEN_FALSE && tkn != TOKEN_TRUE);
+}
 
 // get rid of whitespaces
 void lexer_trim_left(lexer *l){
@@ -301,7 +463,7 @@ parser parser_new(){
 }
 
 // generate lexer from data and data size
-lexer lexer_new(const char *content,size_t content_len){
+lexer lexer_new(char *content,size_t content_len){
 	lexer l = {0};
 	l.content = content;
 	l.content_len = content_len;
@@ -317,8 +479,10 @@ token lexer_next_quote(lexer *l){
 	tkn.text_len =0;
 	while(l->content[l->cursor] != '\"'){
 		if(l->content[l->cursor] == 0){
-			tkn.type = TOKEN_END;
-			return tkn;
+			if(!refill_content(l,tkn)){
+				tkn.type = TOKEN_END;
+				return tkn;
+			}
 		}
 		tkn.text_len += 1;
 		l->cursor +=1;
@@ -332,10 +496,13 @@ token lexer_next(lexer *l){
 	lexer_trim_left(l);
 	
 	token tkn;
+	tkn.text_len = 0;
 	tkn.text = l->content + l->cursor;
 	if(l->cursor >= l->content_len){
-		tkn.type = TOKEN_END;
-		return tkn;
+		if(!refill_content(l,tkn)){
+			tkn.type = TOKEN_END;
+			return tkn;
+		}
 	}
 	
 	//constants for comparison in the switch statement
@@ -385,6 +552,10 @@ token lexer_next(lexer *l){
 			while(isalpha(l->content[l->cursor])){
 				tkn.text_len +=1;
 				if(l->content[l->cursor] == 0){
+					if(!refill_content(l,tkn)){
+						tkn.type = TOKEN_END;
+						return tkn;
+					}
 					tkn.type = TOKEN_END;
 					return tkn;
 				}
@@ -405,6 +576,11 @@ token lexer_next(lexer *l){
 			while(isalpha(l->content[l->cursor])){
 				tkn.text_len +=1;
 				if(l->content[l->cursor] == 0){
+					if(!refill_content(l,tkn)){
+						
+						tkn.type = TOKEN_END;
+						return tkn;
+					}
 					tkn.type = TOKEN_END;
 					return tkn;
 				}
@@ -425,11 +601,13 @@ token lexer_next(lexer *l){
 			while(isalpha(l->content[l->cursor])){
 				tkn.text_len +=1;
 				if(l->content[l->cursor] == 0){
-					tkn.type = TOKEN_END;
-					return tkn;
+					if(!refill_content(l,tkn)){
+						tkn.type = TOKEN_END;
+						return tkn;
+					}
 				}
 				if(tkn.text_len>4 || nullstr[tkn.text_len-1] != l->content[l->cursor]){
-		;			tkn.type=TOKEN_INVALID;
+					tkn.type=TOKEN_INVALID;
 					return tkn;
 				}
 				l->cursor +=1;
@@ -440,6 +618,14 @@ token lexer_next(lexer *l){
 			}
 			tkn.type = TOKEN_NULL;
 			return tkn;
+		case 0:
+			if(!refill_content(l,tkn)){
+				tkn.type = TOKEN_END;
+				return tkn;
+			}
+			tkn.type = TOKEN_END;
+			tkn.text_len = 0;
+			return tkn;
 	}
 
 	// get an integer or float
@@ -448,6 +634,12 @@ token lexer_next(lexer *l){
 		tkn.text = l->content + l->cursor;
 		tkn.type = TOKEN_INT;
 		tkn.text_len = 0;
+		if(l->content[l->cursor] == 0){
+			if(!refill_content(l,tkn)){
+				tkn.type = TOKEN_INVALID;
+				return tkn;
+			}
+		}
 		while(isdigit(l->content[l->cursor]) || l->content[l->cursor] == '.'){
 			if(l->content[l->cursor] == '.'){
 				if(tkn.type == TOKEN_FLOAT){
@@ -457,10 +649,15 @@ token lexer_next(lexer *l){
 				tkn.type = TOKEN_FLOAT;
 			}
 			tkn.text_len+=1;
-			l->cursor+=1;
+			l->cursor+= 1;
+			if(l->content[l->cursor] == 0){
+				if(!refill_content(l,tkn)){
+					tkn.type = TOKEN_INVALID;
+					return tkn;
+				}
+			}
 
 		}
-
 		return tkn;
 	}
 	tkn.type = TOKEN_INVALID;
@@ -480,7 +677,7 @@ const char* token_type_tostring(token_type type){
 		case TOKEN_OBJECT_RIGHT:
 			return "RIGHT OBJECT TOKEN";
 		case TOKEN_ARRAY:
-			return "ARRAY OBJECT";
+			return "ARRAY TOKEN";
 		case TOKEN_ARRAY_LEFT:
 			return "LEFT ARRAY TOKEN";
 		case TOKEN_ARRAY_RIGHT:
